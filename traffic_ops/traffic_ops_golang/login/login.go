@@ -42,9 +42,9 @@ import (
 	"github.com/apache/trafficcontrol/traffic_ops/traffic_ops_golang/config"
 	"github.com/apache/trafficcontrol/traffic_ops/traffic_ops_golang/tocookie"
 
-	"github.com/dgrijalva/jwt-go"
 	"github.com/jmoiron/sqlx"
 	"github.com/lestrrat-go/jwx/jwk"
+	"github.com/lestrrat-go/jwx/jwt"
 )
 
 type emailFormatter struct {
@@ -241,6 +241,14 @@ func TokenLoginHandler(db *sqlx.DB, cfg config.Config) http.HandlerFunc {
 
 // OauthLoginHandler accepts a JSON web token previously obtained from an OAuth provider, decodes it, validates it, authorizes the user against the database, and returns the login result as either an error or success message
 func OauthLoginHandler(db *sqlx.DB, cfg config.Config) http.HandlerFunc {
+	// Note: this variable is created only once per instance of the handler.
+	// As of this writing, it seems that cfg.ConfigTrafficOpsGolang.WhitelistedOAuthUrls is effectively
+	// immutable after initialization, and therefore it is probably safe to do this
+	wl := jwk.NewMapWhitelist()
+	for _, u := range cfg.ConfigTrafficOpsGolang.WhitelistedOAuthUrls {
+		wl.Add(u)
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		handleErrs := tc.GetHandleErrorsFunc(w, r)
 		defer r.Body.Close()
@@ -319,45 +327,18 @@ func OauthLoginHandler(db *sqlx.DB, cfg config.Config) http.HandlerFunc {
 			return
 		}
 
-		decodedToken, err := jwt.Parse(encodedToken, func(unverifiedToken *jwt.Token) (interface{}, error) {
-			publicKeyUrl := unverifiedToken.Header["jku"].(string)
-			publicKeyId := unverifiedToken.Header["kid"].(string)
-
-			matched, err := VerifyUrlOnWhiteList(publicKeyUrl, cfg.ConfigTrafficOpsGolang.WhitelistedOAuthUrls)
-			if err != nil {
-				return nil, err
-			}
-			if !matched {
-				return nil, errors.New("Key URL from token is not included in the whitelisted urls. Received: " + publicKeyUrl)
-			}
-
-			keys, err := jwk.Fetch(context.TODO(), publicKeyUrl)
-			if err != nil {
-				return nil, errors.New("Error fetching JSON key set with message: " + err.Error())
-			}
-
-			keyById, ok := keys.LookupKeyID(publicKeyId)
-			if !ok {
-				return nil, errors.New("No public key found for id: " + publicKeyId + " at url: " + publicKeyUrl)
-			}
-
-			var selectedKey interface{}
-			err = keyById.Raw(&selectedKey)
-			if err != nil {
-				return nil, errors.New("Error materializing key from JSON key set with message: " + err.Error())
-			}
-
-			return selectedKey, nil
-		})
+		decodedToken, err := jwt.Parse(
+			[]byte(encodedToken),
+			jwt.WithVerifyAuto(true),
+			jwt.WithFetchWhitelist(wl),
+		)
 		if err != nil {
 			handleErrs(http.StatusInternalServerError, errors.New("Error decoding token with message: "+err.Error()))
 			log.Errorf("Error decoding token: %s\n", err.Error())
 			return
 		}
 
-		authenticated = decodedToken.Valid
-
-		userId := decodedToken.Claims.(jwt.MapClaims)["sub"].(string)
+		userId := decodedToken.Subject()
 		form.Username = userId
 
 		dbCtx, cancelTx := context.WithTimeout(r.Context(), time.Duration(cfg.DBQueryTimeoutSeconds)*time.Second)
