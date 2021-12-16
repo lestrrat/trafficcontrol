@@ -252,7 +252,6 @@ func OauthLoginHandler(db *sqlx.DB, cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		handleErrs := tc.GetHandleErrorsFunc(w, r)
 		defer r.Body.Close()
-		authenticated := false
 		resp := struct {
 			tc.Alerts
 		}{}
@@ -352,7 +351,7 @@ func OauthLoginHandler(db *sqlx.DB, cfg config.Config) http.HandlerFunc {
 			log.Errorf("checking local user: %s\n", err.Error())
 		}
 
-		if userAllowed && authenticated {
+		if userAllowed {
 			httpCookie := tocookie.GetCookie(userId, defaultCookieDuration, cfg.Secrets[0])
 			http.SetCookie(w, httpCookie)
 			resp = struct {
@@ -370,9 +369,6 @@ func OauthLoginHandler(db *sqlx.DB, cfg config.Config) http.HandlerFunc {
 			return
 		}
 		w.Header().Set(rfc.ContentType, rfc.ApplicationJSON)
-		if !authenticated {
-			w.WriteHeader(http.StatusUnauthorized)
-		}
 		if !userAllowed {
 			w.WriteHeader(http.StatusForbidden)
 		}
